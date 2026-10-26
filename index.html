@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32-S3 Камера</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --panel: #1a1a2e;
+    --text: #e0e0e0;
+    --accent: #4a9eff;
+    --ok: #4caf50;
+    --err: #f44336;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, sans-serif;
+    display: flex; flex-direction: column; align-items: center;
+    min-height: 100vh; margin: 0; padding: 24px;
+  }
+  h1 { font-size: 1.3rem; font-weight: 400; margin: 0 0 20px; }
+
+  .config {
+    background: var(--panel); border-radius: 10px;
+    padding: 14px 18px; margin-bottom: 20px;
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    max-width: 700px; width: 100%;
+  }
+  .config label { font-size: 0.85rem; color: #aaa; }
+  .config input {
+    flex: 1; min-width: 220px;
+    background: #0a0a14; border: 1px solid #333; color: var(--text);
+    padding: 8px 12px; border-radius: 6px; font-size: 0.9rem;
+    font-family: monospace;
+  }
+  .config button {
+    background: var(--accent); color: #fff; border: none;
+    padding: 8px 18px; border-radius: 6px; cursor: pointer;
+    font-size: 0.9rem;
+  }
+  .config button:hover { opacity: 0.85; }
+
+  .stream-box {
+    position: relative; max-width: 100%; width: 100%;
+    border-radius: 12px; overflow: hidden;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+    background: #000; line-height: 0;
+    min-height: 200px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .stream-box img { display: block; width: 100%; height: auto; }
+  .stream-box .placeholder {
+    color: #555; font-size: 0.95rem; line-height: 1.4;
+    text-align: center; padding: 40px 20px;
+  }
+
+  .footer {
+    margin-top: 14px; display: flex; gap: 20px;
+    font-size: 0.85rem; color: #888; align-items: center;
+  }
+  .dot {
+    display: inline-block; width: 8px; height: 8px;
+    border-radius: 50%; background: #666; margin-right: 6px;
+  }
+  .dot.online { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .dot.error  { background: var(--err); }
+</style>
+</head>
+<body>
+
+<h1>ESP32-S3 · Облачная камера</h1>
+
+<div class="config">
+  <label for="serverUrl">Сервер:</label>
+  <input id="serverUrl" type="text" placeholder="http://your-server:8080"
+         value="http://localhost:8080">
+  <button id="connectBtn">Подключить</button>
+</div>
+
+<div class="stream-box" id="streamBox">
+  <div class="placeholder">Введите адрес сервера и нажмите «Подключить»</div>
+</div>
+
+<div class="footer">
+  <span><span class="dot" id="dotEsp"></span><span id="statusEsp">ESP32: неизвестно</span></span>
+  <span id="statusStream">Поток: остановлен</span>
+</div>
+
+<script>
+(() => {
+  const input     = document.getElementById('serverUrl');
+  const btn       = document.getElementById('connectBtn');
+  const box       = document.getElementById('streamBox');
+  const dotEsp    = document.getElementById('dotEsp');
+  const statusEsp = document.getElementById('statusEsp');
+  const statusStr = document.getElementById('statusStream');
+
+  let currentImg = null;
+  let healthTimer = null;
+
+  // Сохраняем адрес сервера, чтобы не вводить каждый раз
+  input.value = localStorage.getItem('camServerUrl') || input.value;
+
+  function setEspStatus(state, text) {
+    dotEsp.className = 'dot ' + (state === 'online' ? 'online' : state === 'offline' ? 'error' : '');
+    statusEsp.textContent = 'ESP32: ' + text;
+  }
+
+  async function checkHealth(baseUrl) {
+    try {
+      const r = await fetch(baseUrl.replace(/\/$/, '') + '/health', { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const data = await r.json();
+      if (data.esp32 === 'online') {
+        setEspStatus('online', 'онлайн');
+      } else {
+        setEspStatus('offline', 'ошибка');
+      }
+    } catch (e) {
+      setEspStatus('offline', 'недоступен');
+    }
+  }
+
+  function connect() {
+    const baseUrl = input.value.trim().replace(/\/$/, '');
+    if (!baseUrl) return;
+
+    localStorage.setItem('camServerUrl', baseUrl);
+
+    // Останавливаем старый поток
+    if (currentImg) {
+      currentImg.src = '';
+      currentImg = null;
+    }
+    box.innerHTML = '';
+
+    // Создаём img для MJPEG
+    const img = document.createElement('img');
+    img.alt = 'MJPEG поток';
+    img.src = baseUrl + '/cam/stream?t=' + Date.now();
+
+    img.onload = () => {
+      statusStr.textContent = 'Поток: активен';
+    };
+    img.onerror = () => {
+      statusStr.textContent = 'Поток: ошибка';
+      setEspStatus('offline', 'недоступен');
+      // Переподключение через 5 секунд
+      setTimeout(() => {
+        if (currentImg === img) {
+          img.src = baseUrl + '/cam/stream?t=' + Date.now();
+        }
+      }, 5000);
+    };
+
+    box.appendChild(img);
+    currentImg = img;
+    statusStr.textContent = 'Поток: подключение...';
+
+    // Проверяем доступность ESP32 сразу и потом каждые 10 секунд
+    checkHealth(baseUrl);
+    if (healthTimer) clearInterval(healthTimer);
+    healthTimer = setInterval(() => checkHealth(baseUrl), 10000);
+  }
+
+  btn.addEventListener('click', connect);
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') connect(); });
+
+  // Автоподключение, если адрес уже был сохранён
+  if (localStorage.getItem('camServerUrl')) {
+    connect();
+  }
+})();
+</script>
+</body>
+</html>
